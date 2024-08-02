@@ -1,9 +1,10 @@
 from PyQt5.QtCore import QStringListModel, QVariant, Qt
-from PyQt5.QtWidgets import QDialog, QTableWidgetItem, QTableWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QListView, QGridLayout, QPushButton, QMessageBox, QGroupBox
+from PyQt5.QtWidgets import QDialog, QTableWidgetItem, QTableWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QListView, QGridLayout, QPushButton, QMessageBox, QSizePolicy
 import numpy as np
 from qgis.core import QgsProject, QgsVectorLayer, QgsApplication
 from sklearn.linear_model import LinearRegression
 from scipy import stats
+from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 
 class LinearRegressionDialog(QDialog):
@@ -29,6 +30,7 @@ class LinearRegressionDialog(QDialog):
         # Create Layout, Widgets
         self.mainLayout = QVBoxLayout()
 
+        # Select Layer Layout
         self.selectLayout = QVBoxLayout()
         self.targetLabel = QLabel("Select a Target Layer:")
         self.selectLayout.addWidget(self.targetLabel)
@@ -47,22 +49,28 @@ class LinearRegressionDialog(QDialog):
         self.fieldLabel = QLabel("Fields")
         self.fieldLayout.addWidget(self.fieldLabel, 0, 0, alignment=Qt.AlignCenter)
         self.fieldView = QListView()
+        self.fieldView.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.fieldModel = QStringListModel()
         self.fieldView.setModel(self.fieldModel)
         self.fieldLayout.addWidget(self.fieldView, 1, 0, 2, 1)
 
         self.inButton = QPushButton(">")
+        self.inButton.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Minimum)
+        self.inButton.setFixedSize(50, 20)
         self.fieldLayout.addWidget(self.inButton, 1, 1, alignment=Qt.AlignCenter)
         self.outButton = QPushButton("<")
+        self.outButton.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Minimum)
+        self.outButton.setFixedSize(50, 20)
         self.fieldLayout.addWidget(self.outButton, 2, 1, alignment=Qt.AlignCenter)
 
         self.independentLabel = QLabel("Independent Variables")
         self.fieldLayout.addWidget(self.independentLabel, 0, 2, alignment=Qt.AlignCenter)
         self.independentView = QListView()
+        self.independentView.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.independentModel = QStringListModel()
         self.independentView.setModel(self.independentModel)
         self.fieldLayout.addWidget(self.independentView, 1, 2, 2, 1)
-
+        
         self.mainLayout.addLayout(self.fieldLayout)
 
         self.buttonLayout = QHBoxLayout()
@@ -76,9 +84,15 @@ class LinearRegressionDialog(QDialog):
         self.mainLayout.addLayout(self.buttonLayout)
 
         self.setLayout(self.mainLayout)
-        self.setGeometry(300, 300, 400, 300)
+        self.setGeometry(300, 200, 350, 300)
 
-
+    def setup_connections(self):
+        self.targetBox.currentTextChanged.connect(self.updateFieldsAndDependentBox)
+        self.inButton.clicked.connect(self.addIndependentVariable)
+        self.outButton.clicked.connect(self.removeIndependentValueable)
+        self.runButton.clicked.connect(self.runRegression)
+        self.cancelButton.clicked.connect(self.close)
+        
     def populateShapefiles(self):
         self.targetBox.clear()  # ComboBox 초기화
         layers = QgsProject.instance().mapLayers().values()
@@ -91,14 +105,6 @@ class LinearRegressionDialog(QDialog):
         else:
             self.targetBox.addItem("No shapefile layers available", None)
 
-
-    def setup_connections(self):
-        self.targetBox.currentTextChanged.connect(self.updateFieldsAndDependentBox)
-        self.inButton.clicked.connect(self.addIndependentVariable)
-        self.outButton.clicked.connect(self.removeIndependentValueable)
-        self.runButton.clicked.connect(self.runRegression)
-        self.cancelButton.clicked.connect(self.close)
-    
     def updateFieldsAndDependentBox(self):
         self.dependentBox.clear()
         self.dependentBox.addItem("", None)
@@ -126,8 +132,6 @@ class LinearRegressionDialog(QDialog):
                 self.fieldModel.setStringList(["No numeric fields"])
                 self.dependentBox.addItem("No numeric fields available")
 
-
-    
     def addIndependentVariable(self):
         selected_indexes = self.fieldView.selectedIndexes()
         if selected_indexes:
@@ -207,10 +211,21 @@ class LinearRegressionDialog(QDialog):
         t_stats = coefficients / rmse
         p_values = [2 * (1 - stats.t.cdf(np.abs(t), df=n-len(coefficients)-1)) for t in t_stats]
         
-        self.showResults(independent_fields, intercept, coefficients, r_squared, adj_r_squared, std, t_stats, p_values)
+        # Intercept statistics
+        X_with_intercept = np.column_stack((np.ones(n), X))
+        intercept_std = np.sqrt(mse * np.linalg.inv(np.dot(X_with_intercept.T, X_with_intercept))[0, 0])
+        mse_intercept = np.mean((y - model.predict(X)) ** 2)
+        intercept_rmse = np.sqrt(mse_intercept * np.linalg.inv(np.dot(X_with_intercept.T, X_with_intercept))[0, 0])
+        intercept_t_stat = intercept / intercept_rmse
+        intercept_p_value = 2 * (1 - stats.t.cdf(np.abs(intercept_t_stat), df=n - k - 1))
+        intercept_stats = [intercept, intercept_std, intercept_t_stat, intercept_p_value]
+        
+        vif = [variance_inflation_factor(X, i) for i in range(X.shape[1])]
+        
+        self.showResults(independent_fields, intercept_stats, coefficients, r_squared, adj_r_squared, std, t_stats, p_values, vif)
 
-    def showResults(self, independent_fields, intercept, coefficients, r_squared, adj_r_squared, std, t_stats, p_values):
-        resultDialog = RegressResults(independent_fields, intercept, coefficients, r_squared, adj_r_squared, std, t_stats, p_values)
+    def showResults(self, independent_fields, intercept_stats, coefficients, r_squared, adj_r_squared, std, t_stats, p_values, vif):
+        resultDialog = RegressResults(independent_fields, intercept_stats, coefficients, r_squared, adj_r_squared, std, t_stats, p_values, vif)
         resultDialog.exec_()
         
     def show(self):
@@ -226,16 +241,17 @@ class RegressResults(QDialog):
     LAB : LSDS
     Date : 2024.07.23 ~ 2024.07.31
     """
-    def __init__(self, independent_fields, intercept, coefficients, r_squared, adj_r_squared, std, t_stats, p_values):
+    def __init__(self, independent_fields, intercept_stats, coefficients, r_squared, adj_r_squared, std, t_stats, p_values, vif):
         super(RegressResults, self).__init__()
         self.independent_fields = independent_fields
-        self.intercept = intercept
-        self.slope = coefficients
+        self.intercept_stats = intercept_stats
+        self.coefficients = coefficients
         self.std = std
         self.t_stats = t_stats
         self.p_values = p_values
         self.r_squared = r_squared
         self.adj_r_squared = adj_r_squared
+        self.vif = vif
         self.init_ui()
 
     def init_ui(self):
@@ -250,19 +266,27 @@ class RegressResults(QDialog):
         # Table for the regression results
         self.table = QTableWidget(self)
         self.table.setColumnCount(6)
-        self.table.setRowCount(len(self.slope))
-        self.table.setHorizontalHeaderLabels(["Variable", "Intercept", "Slope", "Standard Error", "t stats", "P Value"])
+        self.table.setRowCount(len(self.coefficients) + 1)
+        self.table.setHorizontalHeaderLabels(["Variable", "Coefficients", "Standard Error", "t stats", "P Value", "VIF"])
+        
+        # intercept Stats
+        self.table.setItem(0, 0, QTableWidgetItem("intercept"))
+        self.table.setItem(0, 1, QTableWidgetItem(f"{self.intercept_stats[0]:.4f}"))
+        self.table.setItem(0, 2, QTableWidgetItem(f"{self.intercept_stats[1]:.4f}"))
+        self.table.setItem(0, 3, QTableWidgetItem(f"{self.intercept_stats[2]:.2f}"))
+        self.table.setItem(0, 4, QTableWidgetItem(f"{self.intercept_stats[3]:.4f}" if self.intercept_stats[3] > 0.0001 else "<.0001"))
+        self.table.setItem(0, 5, QTableWidgetItem(""))
         
         # Fill in the rows for each results
-        for i, coef in enumerate(self.slope):
-            self.table.setItem(i, 0, QTableWidgetItem(self.independent_fields[i]))
-            self.table.setItem(i, 1, QTableWidgetItem(f"{self.intercept:.4f}"))
-            self.table.setItem(i, 2, QTableWidgetItem(f"{self.slope[i]:.4f}"))
-            self.table.setItem(i, 3, QTableWidgetItem(f"{self.std[i]:.4f}"))
-            self.table.setItem(i, 4, QTableWidgetItem(f"{self.t_stats[i]:.2f}"))
-            self.table.setItem(i, 5, QTableWidgetItem(f"{self.p_values[i]:.4f}" if self.p_values[i] > 0.0001 else "<.0001"))
+        for i, coef in enumerate(self.coefficients):
+            self.table.setItem(i + 1, 0, QTableWidgetItem(self.independent_fields[i]))
+            self.table.setItem(i + 1, 1, QTableWidgetItem(f"{self.coefficients[i]:.4f}"))
+            self.table.setItem(i + 1, 2, QTableWidgetItem(f"{self.std[i]:.4f}"))
+            self.table.setItem(i + 1, 3, QTableWidgetItem(f"{self.t_stats[i]:.2f}"))
+            self.table.setItem(i + 1, 4, QTableWidgetItem(f"{self.p_values[i]:.4f}" if self.p_values[i] > 0.0001 else "<.0001"))
+            self.table.setItem(i + 1, 5, QTableWidgetItem(f"{self.vif[i]:.4f}"))
         
         layout.addWidget(self.table)
         self.setLayout(layout)
         self.setWindowTitle("Regression Results")
-        self.setGeometry(710, 300, 700, 300)
+        self.setGeometry(660, 225, 675, 300)
